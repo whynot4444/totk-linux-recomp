@@ -1,0 +1,103 @@
+# TotK-Setup for Linux as an AppImage (tools/make_appimage.py). Run it from the Actions tab ("Run workflow"), or push a
+# tag v*; the AppImage is the run's artifact, and on a tag also a release asset. It holds no game data: the player's
+# own files are turned into the game on their machine (docs/installer.md).
+#
+# Ubuntu 22.04: the sysroot the AppImage links totk against is this runner's, so totk needs glibc 2.35 or later.
+name: AppImage (Linux)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # the release asset on a tag
+
+env:
+  PYTHON_STANDALONE: https://github.com/astral-sh/python-build-standalone/releases/download/20251014/cpython-3.14.0+20251014-x86_64-unknown-linux-gnu-install_only.tar.gz
+  LLVM: https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-Linux-X64.tar.xz
+  NINJA: https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip
+  APPIMAGETOOL: https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage
+  SDL_TAG: release-3.2.24
+  VULKAN_HEADERS_TAG: v1.4.328
+  VMA_TAG: v3.3.0
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # make_release.version() names the commit
+
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build git unzip clang lld \
+            zlib1g-dev libmbedtls-dev libopus-dev libvpx-dev libzstd-dev libvulkan-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libegl-dev libgles-dev libdrm-dev libgbm-dev libdecor-0-dev \
+            libpulse-dev libasound2-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libibus-1.0-dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Downloads
+        run: |
+          mkdir -p "$RUNNER_TEMP/dl" && cd "$RUNNER_TEMP/dl"
+          curl -fsSL -o python.tar.gz "$PYTHON_STANDALONE"
+          curl -fsSL -o llvm.tar.xz "$LLVM" && mkdir llvm && tar -xJf llvm.tar.xz -C llvm --strip-components=1
+          curl -fsSL -o ninja.zip "$NINJA" && unzip -q ninja.zip && chmod +x ninja
+          curl -fsSL -o appimagetool "$APPIMAGETOOL" && chmod +x appimagetool
+          git clone -q --depth 1 -b "$SDL_TAG" https://github.com/libsdl-org/SDL.git sdl-src
+          git clone -q --depth 1 -b "$VULKAN_HEADERS_TAG" https://github.com/KhronosGroup/Vulkan-Headers.git vulkan-headers
+          git clone -q --depth 1 -b "$VMA_TAG" https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git vma
+          git clone -q https://github.com/ly05010419/MacNativeGames.git "$GITHUB_WORKSPACE/refs/MacNativeGames"
+
+      - name: SDL3
+        run: |
+          cd "$RUNNER_TEMP/dl"
+          cmake -S sdl-src -B sdl-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdl3" \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_STATIC=OFF
+          ninja -C sdl-build install
+
+      - name: hactool
+        run: python tools/build_hactool.py
+
+      - name: Shader translator
+        run: python tools/build_xlate.py
+
+      - name: AppImage
+        run: |
+          D="$RUNNER_TEMP/dl"
+          python tools/make_appimage.py --out build/appimage/AppDir \
+            --appimage build/appimage/TotK-Setup-x86_64.AppImage --appimagetool "$D/appimagetool" \
+            --python-tar "$D/python.tar.gz" --llvm "$D/llvm" --sdl3 "$RUNNER_TEMP/sdl3" \
+            --vulkan-headers "$D/vulkan-headers" --vma "$D/vma" --ninja "$D/ninja" \
+            --hactool toolchain/hactool/hactool --xlate build/xlate/totk_xlate
+
+      - name: Smoke test
+        run: |
+          # the bundled toolchain builds the installer's host check, and the command-line installer starts
+          A=build/appimage/AppDir
+          "$A/llvm/bin/clang" -O1 "$A/installer/hostcheck.c" -I "$A/runtime/deps/include" -o hostcheck -ldl \
+            --sysroot="$A/sysroot" -fuse-ld=lld
+          ./hostcheck
+          APPIMAGE_EXTRACT_AND_RUN=1 build/appimage/TotK-Setup-x86_64.AppImage --cli --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TotK-Setup-x86_64.AppImage
+          path: build/appimage/TotK-Setup-x86_64.AppImage
+          if-no-files-found: error
+
+      - name: Release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/appimage/TotK-Setup-x86_64.AppImage
