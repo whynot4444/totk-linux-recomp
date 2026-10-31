@@ -16,6 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#ifndef _WIN32
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+#endif
 
 #include "cfg.h"
 #include "flight.h"
@@ -175,6 +179,7 @@ void gfx_vsync_bind_counter(volatile long *counter) {
 uint64_t gfx_vsync_ticks(void) { return (uint64_t)InterlockedCompareExchange64(&g_ticks, 0, 0); }
 uint64_t gfx_vsync_time_ns(uint64_t tick) { return (uint64_t)g_vs_start_ns + tick * VSYNC_NS / VSYNC_HZ; }
 
+#ifdef _WIN32
 // ---- focus
 int gfx_window_focused(void) { return g_focused; }
 unsigned gfx_window_focus_messages(void) { return (unsigned)g_focus_msgs; }
@@ -452,6 +457,45 @@ static DWORD WINAPI window_main(void *arg) {
     return 0;
 }
 
+// The window as the shared swapchain code below sees it (window-system specific).
+static int wnd_minimized(void) { return IsIconic(g_hwnd); }
+
+static void wnd_client_size(int *w, int *h) {
+    RECT rc = {0};
+    GetClientRect(g_hwnd, &rc);
+    *w = rc.right, *h = rc.bottom;
+}
+
+static void wnd_set_client_size(int cw, int ch) {
+    RECT r = {0, 0, cw, ch};
+    AdjustWindowRect(&r, WND_STYLE, FALSE);
+    SetWindowPos(g_hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+// Starts the window thread when there is no window yet; 0 when the window could not be made.
+static int wnd_open(void) {
+    if (g_hwnd) return 1;
+    g_wnd_failed = 0;
+    g_wnd_ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    HANDLE t = CreateThread(NULL, 0, window_main, NULL, 0, NULL);
+    if (!t) rt_fatal("gfx: cannot start the window thread (error %lu)", GetLastError());
+    CloseHandle(t);
+    WaitForSingleObject(g_wnd_ready, INFINITE);
+    CloseHandle(g_wnd_ready);
+    return !g_wnd_failed;
+}
+
+static void wnd_create_surface(VkInstance inst, VkSurfaceKHR *out) {
+    VkWin32SurfaceCreateInfoKHR si = {.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+                                      .hinstance = GetModuleHandleW(NULL), .hwnd = g_hwnd};
+    VkResult vr = vkCreateWin32SurfaceKHR(inst, &si, NULL, out);
+    if (vr != VK_SUCCESS) rt_fatal("gfx: vkCreateWin32SurfaceKHR failed (%d)", (int)vr);
+}
+
+#else
+#include "gfx_window_sdl.inc"   // the same functions on an SDL3 window (Linux)
+#endif
+
 // ---- swapchain
 static const char *g_present_got = "";   // the TOTK_VK_PRESENT value of the mode the swapchain got; "" before one
 
@@ -508,10 +552,10 @@ static int create_swapchain(void) {
     VkCtx *c = vk_ctx();
     VkSurfaceCapabilitiesKHR caps;
     if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c->phys, g_surface, &caps) != VK_SUCCESS) return 0;
-    RECT rc = {0};
-    GetClientRect(g_hwnd, &rc);
+    int cw = 0, chh = 0;
+    wnd_client_size(&cw, &chh);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent
-                                                            : (VkExtent2D){(uint32_t)rc.right, (uint32_t)rc.bottom};
+                                                            : (VkExtent2D){(uint32_t)cw, (uint32_t)chh};
     if (!ext.width || !ext.height) return 0;
     uint32_t nf = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(c->phys, g_surface, &nf, NULL);
@@ -747,9 +791,9 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     EnterCriticalSection(&g_pl);
     flip_locked();
     if (!g_sc || InterlockedCompareExchange(&g_dirty, 0, 0)) {
-        if (!IsIconic(g_hwnd) && !create_swapchain() && !g_sc) goto out;
+        if (!wnd_minimized() && !create_swapchain() && !g_sc) goto out;
     }
-    if (IsIconic(g_hwnd) || !g_sc) goto out;
+    if (wnd_minimized() || !g_sc) goto out;
 
     unsigned slot = g_frame % FRAMES;
     if (vkWaitForFences(c->device, 1, &g_fence[slot], VK_TRUE, 5000000000ull) != VK_SUCCESS) {
@@ -901,9 +945,7 @@ void vk_present_flip(void) {
 
 void gfx_window_resize(int cw, int chh) {
     gfx_window_start();
-    RECT r = {0, 0, cw, chh};
-    AdjustWindowRect(&r, WND_STYLE, FALSE);
-    SetWindowPos(g_hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    wnd_set_client_size(cw, chh);
     EnterCriticalSection(&g_pl);
     create_swapchain();
     LeaveCriticalSection(&g_pl);
@@ -945,20 +987,8 @@ void gfx_window_start(void) {
     if (!g_started) {
         if (!vk_init()) rt_fatal("gfx: no usable Vulkan device (see the vk: lines above)");
         VkCtx *c = vk_ctx();
-        if (!g_hwnd) {
-            g_wnd_failed = 0;
-            g_wnd_ready = CreateEventW(NULL, TRUE, FALSE, NULL);
-            HANDLE t = CreateThread(NULL, 0, window_main, NULL, 0, NULL);
-            if (!t) rt_fatal("gfx: cannot start the window thread (error %lu)", GetLastError());
-            CloseHandle(t);
-            WaitForSingleObject(g_wnd_ready, INFINITE);
-            CloseHandle(g_wnd_ready);
-            if (g_wnd_failed) rt_fatal("gfx: window creation failed");
-        }
-        VkWin32SurfaceCreateInfoKHR si = {.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
-                                          .hinstance = GetModuleHandleW(NULL), .hwnd = g_hwnd};
-        VkResult vr = vkCreateWin32SurfaceKHR(c->instance, &si, NULL, &g_surface);
-        if (vr != VK_SUCCESS) rt_fatal("gfx: vkCreateWin32SurfaceKHR failed (%d)", (int)vr);
+        if (!wnd_open()) rt_fatal("gfx: window creation failed");
+        wnd_create_surface(c->instance, &g_surface);
 
         VkCommandPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = c->gfx_family};
@@ -977,10 +1007,9 @@ void gfx_window_start(void) {
         EnterCriticalSection(&g_pl);
         create_swapchain();
         LeaveCriticalSection(&g_pl);
-        RECT rc = {0};
-        GetClientRect(g_hwnd, &rc);
-        rt_log("gfx: window %ldx%ld, swapchain %ux%u format %d", rc.right, rc.bottom, g_sc_ext.width, g_sc_ext.height,
-               (int)g_sc_fmt);
+        int ww = 0, wh = 0;
+        wnd_client_size(&ww, &wh);
+        rt_log("gfx: window %dx%d, swapchain %ux%u format %d", ww, wh, g_sc_ext.width, g_sc_ext.height, (int)g_sc_fmt);
     }
     LeaveCriticalSection(&g_start_lock);
     vsync_ensure();

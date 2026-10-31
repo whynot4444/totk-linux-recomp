@@ -1,6 +1,7 @@
 // --probe-window: presents 300 frames of a cycling clear colour through vk_present_image, reads the swapchain image back
 // and compares every pixel, measures the vsync rate, flips the focus state with synthetic WM_ACTIVATEAPP messages and
 // resizes the window. Run with TOTK_VK_VALIDATION=1 to count validation errors.
+#ifdef _WIN32
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -211,3 +212,13 @@ int probe_window(void) {
     printf("probe-window: passed (%d frames, %ld validation errors, vsync %.1f Hz)\n", FRAMES, errors, rate);
     return 0;
 }
+#else
+#include <stdio.h>
+
+// The probe drives the window with Win32 messages (synthetic WM_ACTIVATEAPP, WM_SIZE); the SDL window has no such
+// seam yet.
+int probe_window(void) {
+    printf("--probe-window: not available on Linux yet (the probe sends Win32 window messages)\n");
+    return 1;
+}
+#endif

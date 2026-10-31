@@ -42,8 +42,27 @@ static int layer_present(const char *name) {
 }
 
 static int create_instance(void) {
+#ifdef _WIN32
     const char *ext[4] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     uint32_t n_ext = 2;
+#else
+    // The instance exists before the window, and SDL picks X11 or Wayland when it opens it: every window-system
+    // surface extension the loader offers is enabled, so SDL_Vulkan_CreateSurface finds the one it needs.
+    const char *ext[8] = {VK_KHR_SURFACE_EXTENSION_NAME};
+    uint32_t n_ext = 1;
+    {
+        static const char *const wsi[] = {"VK_KHR_xlib_surface", "VK_KHR_xcb_surface", "VK_KHR_wayland_surface"};
+        uint32_t n = 0;
+        vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
+        VkExtensionProperties *have = calloc(n ? n : 1, sizeof *have);
+        vkEnumerateInstanceExtensionProperties(NULL, &n, have);
+        for (size_t k = 0; k < sizeof wsi / sizeof *wsi; k++)
+            for (uint32_t i = 0; i < n; i++)
+                if (!strcmp(have[i].extensionName, wsi[k])) ext[n_ext++] = wsi[k];
+        free(have);
+        if (n_ext == 1) rt_log("vk: the Vulkan loader offers no X11 or Wayland surface extension");
+    }
+#endif
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     int validate = cfg_bool("TOTK_VK_VALIDATION");
     if (validate && !layer_present(layers[0])) {
@@ -95,7 +114,14 @@ static const char *missing_required(VkPhysicalDevice pd) {
 static uint32_t find_gfx_family(VkPhysicalDevice pd, const VkQueueFamilyProperties *qp, uint32_t nq) {
     for (uint32_t i = 0; i < nq; i++)
         if ((qp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) &&
-            vkGetPhysicalDeviceWin32PresentationSupportKHR(pd, i))
+#ifdef _WIN32
+            vkGetPhysicalDeviceWin32PresentationSupportKHR(pd, i)
+#else
+            // The window (and so its X11 display or Wayland connection) comes later; the graphics family of the Linux
+            // desktop drivers presents
+            1
+#endif
+            )
             return i;
     return UINT32_MAX;
 }

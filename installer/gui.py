@@ -10,6 +10,7 @@ this file only draws. The window text is in installer/text/<en|ru>.json under "u
 import argparse
 import json
 import os
+import subprocess
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -477,7 +478,11 @@ class App:
     def open_folder(self):
         dest = self.model.dest
         if dest and Path(dest).is_dir():
-            os.startfile(dest)
+            if os.name == 'nt':
+                os.startfile(dest)
+            else:   # the desktop's file manager; the AppImage's own libraries stay out of its environment
+                env = {k: v for k, v in os.environ.items() if not k.startswith(('PYTHON', 'LD_', 'APPDIR', 'APPIMAGE'))}
+                subprocess.Popen(['xdg-open', dest], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # ---- self test ---------------------------------------------------------------------------------------------------

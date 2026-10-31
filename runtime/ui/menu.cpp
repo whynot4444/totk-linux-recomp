@@ -45,7 +45,11 @@ extern const char rt_port_version[];
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc23-extensions"   // #embed in C++
 static const unsigned char roboto_ttf[] = {
+#if defined(__has_embed)
 #embed "fonts/Roboto-Medium.ttf"
+#else   // a compiler before #embed (clang 18): the same bytes, written by tools/build_game.py into the build directory
+#include "roboto_ttf.inc"
+#endif
 };
 #pragma clang diagnostic pop
 

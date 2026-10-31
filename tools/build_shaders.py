@@ -11,12 +11,18 @@ shader. Needs glslc and spirv-val from MSYS2 UCRT64 (package mingw-w64-ucrt-x86_
 import argparse
 import hashlib
 import subprocess
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BIN = Path(r'C:\msys64\ucrt64\bin')
+LINUX = sys.platform.startswith('linux')   # Linux: glslc and spirv-val from PATH (shaderc, spirv-tools)
+
+
+def tool(name):
+    return (shutil.which(name) or name) if LINUX else str(BIN / f'{name}.exe')
 TARGET = 'vulkan1.1'
 
 
@@ -54,9 +60,9 @@ def stale(runtime):
 def compile_one(src):
     with tempfile.TemporaryDirectory() as tmp:
         spv = Path(tmp) / 'out.spv'
-        subprocess.run([str(BIN / 'glslc.exe'), '-O', f'--target-env={TARGET}', '-fshader-stage=compute',
+        subprocess.run([tool('glslc'), '-O', f'--target-env={TARGET}', '-fshader-stage=compute',
                         '-o', str(spv), str(src)], check=True)
-        subprocess.run([str(BIN / 'spirv-val.exe'), f'--target-env', TARGET, str(spv)], check=True)
+        subprocess.run([tool('spirv-val'), f'--target-env', TARGET, str(spv)], check=True)
         data = spv.read_bytes()
     words = [int.from_bytes(data[i:i + 4], 'little') for i in range(0, len(data), 4)]
     header_path(src).write_text(header_of(src, words), encoding='utf-8', newline='\n')

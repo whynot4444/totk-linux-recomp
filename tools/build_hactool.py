@@ -22,6 +22,12 @@ PATCHES = [ROOT / 'tools' / 'hactool' / n for n in ('portable.patch', 'unicode.p
 MSYS_BASH = Path(r'C:\msys64\usr\bin\bash.exe')
 CONFIG_MK = ('CC = gcc\nEXEEXT = .exe\nCFLAGS = -O2 -Wall -Wextra -pedantic -std=gnu11\n'
              'LDFLAGS = -lmbedtls -lmbedx509 -lmbedcrypto -static\n')
+# Linux: the system gcc and make, linked against the system's mbedtls 2.x or 3.x (libmbedtls-dev, mbedtls-devel).
+LINUX = sys.platform.startswith('linux')
+# mbedtls linked statically: the binary also runs from the AppImage, on systems without mbedtls.
+CONFIG_MK_LINUX = ('CC = gcc\nEXEEXT =\nCFLAGS = -O2 -Wall -Wextra -pedantic -std=gnu11\n'
+                   'LDFLAGS = -Wl,-Bstatic -lmbedtls -lmbedx509 -lmbedcrypto -Wl,-Bdynamic\n')
+EXE = 'hactool' if LINUX else 'hactool.exe'
 
 
 def git(src, *args):
@@ -44,31 +50,36 @@ def fetch(src):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--src', type=Path, default=ROOT / 'toolchain' / 'src' / 'hactool', help='source checkout')
-    ap.add_argument('--out', type=Path, default=ROOT / 'toolchain' / 'hactool', help='where hactool.exe goes')
+    ap.add_argument('--out', type=Path, default=ROOT / 'toolchain' / 'hactool', help='where hactool(.exe) goes')
     args = ap.parse_args()
-    if not MSYS_BASH.is_file():
+    if not LINUX and not MSYS_BASH.is_file():
         sys.exit(f'{MSYS_BASH} not found: install MSYS2 with the UCRT64 gcc and make (docs/building.md)')
+    if LINUX and not (shutil.which('gcc') and shutil.which('make')):
+        sys.exit('gcc and make not found: install them and the mbedtls development files (docs/linux.md)')
     src, out = args.src.resolve(), args.out.resolve()
 
     fetch(src)
     for p in PATCHES:
         git(src, 'apply', '--whitespace=nowarn', str(p))
-    (src / 'config.mk').write_text(CONFIG_MK, encoding='utf-8', newline='\n')
+    (src / 'config.mk').write_text(CONFIG_MK_LINUX if LINUX else CONFIG_MK, encoding='utf-8', newline='\n')
 
-    env = dict(os.environ, MSYSTEM='UCRT64', CHERE_INVOKING='1')
-    r = subprocess.run([str(MSYS_BASH), '-lc', f'make -j{os.cpu_count() or 4}'], cwd=src, env=env,
-                       capture_output=True, text=True)
+    if LINUX:
+        r = subprocess.run(['make', f'-j{os.cpu_count() or 4}'], cwd=src, capture_output=True, text=True)
+    else:
+        env = dict(os.environ, MSYSTEM='UCRT64', CHERE_INVOKING='1')
+        r = subprocess.run([str(MSYS_BASH), '-lc', f'make -j{os.cpu_count() or 4}'], cwd=src, env=env,
+                           capture_output=True, text=True)
     (src / 'build.log').write_text(r.stdout + r.stderr, encoding='utf-8')
     if r.returncode:
         sys.exit(f'make failed ({r.returncode}); log: {src / "build.log"}')
 
     out.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src / 'hactool.exe', out / 'hactool.exe')
+    shutil.copy2(src / EXE, out / EXE)
     shutil.copy2(src / 'LICENSE', out / 'LICENSE')
-    banner = subprocess.run([str(out / 'hactool.exe')], capture_output=True, text=True)
+    banner = subprocess.run([str(out / EXE)], capture_output=True, text=True)
     if 'hactool (c) SciresM' not in banner.stdout + banner.stderr:
-        sys.exit(f'{out / "hactool.exe"} does not start')
-    print(f'{out / "hactool.exe"}: {COMMIT[:7]} + {", ".join(p.name for p in PATCHES)}')
+        sys.exit(f'{out / EXE} does not start')
+    print(f'{out / EXE}: {COMMIT[:7]} + {", ".join(p.name for p in PATCHES)}')
 
 
 if __name__ == '__main__':

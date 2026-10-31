@@ -1,5 +1,8 @@
 """Build the shader translator: build/xlate/totk_xlate.exe (Ryujinx 1.3.2 + patches, NativeAOT, SPIR-V for Vulkan).
 
+Linux: the same with -r linux-x64; the result is build/xlate/totk_xlate (no suffix), which the runtime finds where it looks
+for totk_xlate.exe. NativeAOT links with clang and needs zlib's development files there; no vswhere.
+
 Copies tools/vendor/ryujinx to build/xlate/ryujinx, applies tools/xlate/patches/*.patch there (tools/vendor stays
 byte-identical; 0001-0004 are MNG's, 0005-0009 are ours), then runs `dotnet publish`. Needs the .NET 10 SDK, the MSVC build
 tools and vswhere.exe (docs/building.md). Run with .venv.
@@ -138,13 +141,15 @@ def main() -> None:
         global BUILD
         BUILD = a.out.resolve()
     if a.id_only:
-        write_identity(BUILD / "totk_xlate.exe")
+        write_identity(BUILD / ("totk_xlate" if sys.platform.startswith("linux") else "totk_xlate.exe"))
         return
     started = time.time()
     dotnet = shutil.which("dotnet")
     if not dotnet:
         sys.exit("missing: dotnet (.NET 10 SDK)")
-    if not (VSWHERE_DIR / "vswhere.exe").is_file() and not shutil.which("vswhere"):
+    linux = sys.platform.startswith("linux")
+    name = "totk_xlate" if linux else "totk_xlate.exe"
+    if not linux and not (VSWHERE_DIR / "vswhere.exe").is_file() and not shutil.which("vswhere"):
         sys.exit(f"missing: vswhere.exe (expected in {VSWHERE_DIR}); NativeAOT cannot link without it")
     env = dict(os.environ)
     env["PATH"] = str(VSWHERE_DIR) + os.pathsep + env["PATH"]
@@ -159,13 +164,13 @@ def main() -> None:
     out = BUILD / "publish"
     shutil.rmtree(out, ignore_errors=True)
     cmd = [
-        dotnet, "publish", str(work / "totk_xlate.csproj"), "-c", "Release", "-r", "win-x64",
+        dotnet, "publish", str(work / "totk_xlate.csproj"), "-c", "Release", "-r", "linux-x64" if linux else "win-x64",
         "-p:PublishAot=true", "-p:InvariantGlobalization=true", f"-p:RyuSrc={src}", "-o", str(out),
     ]
     if subprocess.run(cmd, env=env).returncode != 0:
         sys.exit("dotnet publish failed")
-    exe = BUILD / "totk_xlate.exe"
-    shutil.copy2(out / "totk_xlate.exe", exe)
+    exe = BUILD / name
+    shutil.copy2(out / name, exe)
     write_identity(exe)
     print(f"built {exe} ({exe.stat().st_size / 1e6:.1f} MB) in {time.time() - started:.0f} s")
 

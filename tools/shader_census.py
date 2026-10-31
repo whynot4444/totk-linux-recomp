@@ -24,6 +24,7 @@ import json
 import re
 import struct
 import subprocess
+import shutil
 import sys
 import time
 from collections import defaultdict
@@ -33,7 +34,8 @@ import lz4.block
 
 ROOT = Path(__file__).resolve().parent.parent
 XLATE = ROOT / 'build' / 'xlate' / 'totk_xlate.exe'
-SPIRV_VAL = Path(r'C:\msys64\ucrt64\bin\spirv-val.exe')
+SPIRV_VAL = Path(shutil.which('spirv-val') or 'spirv-val') if sys.platform.startswith('linux') else \
+    Path(r'C:\msys64\ucrt64\bin\spirv-val.exe')
 ZSTD = b'\x28\xb5\x2f\xfd'
 # NVN program control section magic, u32 0x98761234 (d2r-mobile dm/gfx/tools/shader_map.py)
 CONTROL_MAGIC = b'\x34\x12\x76\x98'

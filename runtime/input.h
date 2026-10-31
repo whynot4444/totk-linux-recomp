@@ -48,6 +48,17 @@ int input_cursor_released(void);   // Esc or a non-client activation released th
 // The menu's Win32 adapter (ui/menu_win.cpp), called next: F1 / Esc open or close the menu; while it is open, keys,
 // mouse and focus go to it. Returns 1 with *res set when the message is fully handled.
 int menu_window_msg(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res);
+#else
+// The SDL3 window (gfx_window_sdl.inc, Linux) hands every event to input_sdl_event first (mouse motion for the camera,
+// cursor capture; returns 1 when the event is fully handled), then to the menu's adapter (ui/menu_sdl.cpp; pixel_scale:
+// window pixels per SDL point). input_sdl_tick runs on the window thread after each batch of events and applies the
+// cursor capture other threads asked for.
+union SDL_Event;
+struct SDL_Window;
+int input_sdl_event(struct SDL_Window *w, const union SDL_Event *e);
+void input_sdl_tick(struct SDL_Window *w);
+int input_cursor_released(void);
+int menu_sdl_event(const union SDL_Event *e, float pixel_scale);
 #endif
 void input_cursor_suspend(int on);
 

@@ -1,10 +1,17 @@
 // Vulkan-internal header of the graphics layer. Host code only; the guest never sees it.
 #pragma once
+#ifdef _WIN32
 #ifndef VK_USE_PLATFORM_WIN32_KHR
 #define VK_USE_PLATFORM_WIN32_KHR 1
 #endif
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_win32.h>
+#else
+// Linux: SDL creates the surface (gfx_window.c). vulkan_win32.h brings <windows.h> to every includer on Windows; the
+// stand-in (runtime/platform/linux) does here.
+#include <windows.h>
+#include <vulkan/vulkan.h>
+#endif
 #include <stdint.h>
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnullability-completeness"

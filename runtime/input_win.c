@@ -277,6 +277,7 @@ static int key_vk(int key) {
     return 0;
 }
 
+#ifdef _WIN32
 uint32_t input_key_char(int key) {
     if (key < KEY_MINUS || key > KEY_GRAVE) return 0;
     return MapVirtualKeyW((UINT)key_vk(key), MAPVK_VK_TO_CHAR) & 0x7fffffffu;   // the top bit marks a dead key
@@ -396,6 +397,138 @@ int input_window_msg(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res) {
     }
     return 0;
 }
+
+#else
+uint32_t input_key_char(int key) {
+    SDL_Scancode sc;
+    switch (key) {
+    case KEY_MINUS: sc = SDL_SCANCODE_MINUS; break;
+    case KEY_EQUALS: sc = SDL_SCANCODE_EQUALS; break;
+    case KEY_LBRACKET: sc = SDL_SCANCODE_LEFTBRACKET; break;
+    case KEY_RBRACKET: sc = SDL_SCANCODE_RIGHTBRACKET; break;
+    case KEY_SEMICOLON: sc = SDL_SCANCODE_SEMICOLON; break;
+    case KEY_APOSTROPHE: sc = SDL_SCANCODE_APOSTROPHE; break;
+    case KEY_COMMA: sc = SDL_SCANCODE_COMMA; break;
+    case KEY_PERIOD: sc = SDL_SCANCODE_PERIOD; break;
+    case KEY_SLASH: sc = SDL_SCANCODE_SLASH; break;
+    case KEY_BACKSLASH: sc = SDL_SCANCODE_BACKSLASH; break;
+    case KEY_GRAVE: sc = SDL_SCANCODE_GRAVE; break;
+    default: return 0;
+    }
+    SDL_Keycode k = SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE, false);   // the layout's character, as on Windows
+    return (k & SDLK_SCANCODE_MASK) ? 0 : (uint32_t)k;
+}
+
+// ---- mouse camera: relative motion accumulated by the window thread, one stick sample per presented frame
+static volatile LONG mouse_dx, mouse_dy;   // counts since the last frame sample
+static float mouse_fx, mouse_fy;           // window thread: SDL's fractional motion not yet counted
+static volatile LONG cur_captured;         // relative mouse mode wanted: cursor hidden and confined
+static volatile LONG cur_active;           // the window has input focus
+enum { CUR_REL = 1, CUR_ESC = 2 };         // as in the Win32 version above
+static volatile LONG cur_rel;
+static void cur_rel_update(LONG (*f)(LONG)) {
+    LONG o, n;
+    do { o = cur_rel; n = f(o); } while (n != o && InterlockedCompareExchange(&cur_rel, n, o) != o);
+}
+static LONG rel_esc(LONG o) { return o & CUR_REL ? o : CUR_REL | CUR_ESC; }
+static LONG rel_clear(LONG o) { (void)o; return 0; }
+static LONG rel_menu_closed(LONG o) { return o & CUR_ESC ? 0 : o; }
+static volatile LONG cur_suspend;          // F11 under way
+static SRWLOCK cur_lock = SRWLOCK_INIT;
+static volatile LONG g_block;              // text entry state, see input_block
+static volatile LONG g_menu;               // in-game menu state, see input_menu
+static float mouse_sens = -1;              // TOTK_MOUSE_SENS, 0 = mouse camera off; live (cfg_version)
+static unsigned mouse_sens_seen;
+
+static float mouse_sens_get(void) {
+    unsigned ver = cfg_version();
+    if (mouse_sens >= 0 && ver == mouse_sens_seen) return mouse_sens;
+    mouse_sens_seen = ver;
+    double v = cfg_double("TOTK_MOUSE_SENS");
+    mouse_sens = (float)(v < 0 ? 0 : v > 10 ? 10 : v);
+    return mouse_sens;
+}
+
+// The same conditions as the Win32 cursor_update; the window thread applies the result (input_sdl_tick), as SDL's
+// relative mouse mode belongs to it. Safe from any thread.
+static void cursor_update(HWND h) {
+    SDL_Window *w = (SDL_Window *)h;
+    const char *in = cfg_get("TOTK_INPUT");
+    AcquireSRWLockExclusive(&cur_lock);
+    int want = w && cur_active && !(cur_rel & CUR_REL) && !cur_suspend && g_block != 1 && g_menu != 1 &&
+               mouse_sens_get() > 0 && !(in && !strcmp(in, "none")) && GetForegroundWindow() == h &&
+               !(SDL_GetWindowFlags(w) & SDL_WINDOW_MINIMIZED);
+    if (want && !cur_captured) {
+        InterlockedExchange(&mouse_dx, 0);
+        InterlockedExchange(&mouse_dy, 0);
+    }
+    InterlockedExchange(&cur_captured, want);
+    ReleaseSRWLockExclusive(&cur_lock);
+}
+
+void input_sdl_tick(SDL_Window *w) {
+    static int applied = -1;
+    int want = cur_captured != 0;
+    if (want != applied && SDL_SetWindowRelativeMouseMode(w, want)) {
+        applied = want;
+        mouse_fx = mouse_fy = 0;
+    }
+}
+
+int input_cursor_released(void) { return (cur_rel & CUR_REL) != 0; }
+
+void input_cursor_suspend(int on) {
+    InterlockedExchange(&cur_suspend, on != 0);
+    cursor_update(gfx_window_handle());
+}
+
+// Window thread, every event first. Never consumes one: the window and the menu see them too.
+int input_sdl_event(SDL_Window *w, const SDL_Event *e) {
+    HWND h = (HWND)w;
+    switch (e->type) {
+    case SDL_EVENT_MOUSE_MOTION:
+        if (cur_captured) {
+            mouse_fx += e->motion.xrel;
+            mouse_fy += e->motion.yrel;
+            LONG dx = (LONG)mouse_fx, dy = (LONG)mouse_fy;
+            mouse_fx -= (float)dx, mouse_fy -= (float)dy;
+            if (dx) InterlockedAdd(&mouse_dx, dx);
+            if (dy) InterlockedAdd(&mouse_dy, dy);
+        }
+        break;
+    case SDL_EVENT_KEY_DOWN:   // Esc is unbound in the game layout: it releases the cursor and opens the menu
+        if (e->key.scancode == SDL_SCANCODE_ESCAPE && !e->key.repeat && !(cur_rel & CUR_REL)) {
+            cur_rel_update(rel_esc);
+            cursor_update(h);
+        }
+        break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:   // a click in the window captures again; poll_merged drops the click
+        if (cur_rel & CUR_REL) {
+            cur_rel_update(rel_clear);
+            cursor_update(h);
+        }
+        break;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+    case SDL_EVENT_WINDOW_FOCUS_LOST: {
+        int in = e->type == SDL_EVENT_WINDOW_FOCUS_GAINED;
+        if (!in) cur_rel_update(rel_clear);   // Alt+Tab back in captures again
+        InterlockedExchange(&cur_active, in);
+        cursor_update(h);
+        break;
+    }
+    case SDL_EVENT_WINDOW_RESIZED: case SDL_EVENT_WINDOW_MOVED: case SDL_EVENT_WINDOW_MINIMIZED:
+    case SDL_EVENT_WINDOW_RESTORED: case SDL_EVENT_WINDOW_MOUSE_ENTER:
+        cursor_update(h);
+        break;
+    case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        InterlockedExchange(&cur_active, 0);
+        cursor_update(h);
+        break;
+    }
+    return 0;
+}
+
+#endif
 
 static int key_down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 

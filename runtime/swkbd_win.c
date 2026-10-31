@@ -133,6 +133,7 @@ typedef struct {
     uint32_t disabled;
 } SwkbdRequest;
 
+#ifdef _WIN32
 // ---- Win32 front end
 #define TIMER_ID 1
 #define TIMER_MS 16
@@ -293,6 +294,87 @@ static int text_entry_run(const SwkbdRequest *req, uint16_t *out, size_t cap, si
     memcpy(out, e.text, *n * 2);
     return 1;
 }
+#else
+// ---- Linux front end: the desktop's own text prompt (zenity, else kdialog), run as a child process. The game window
+// keeps running behind it; while it is open the game reads no input (the caller's input_block). Without either tool
+// the starting text is the answer, as if confirmed, and the log says so.
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char **environ;
+
+// Runs argv and returns its stdout (malloc'd, trailing newline removed) when it exits with 0; NULL otherwise.
+static char *run_prompt(char *const argv[]) {
+    int fds[2];
+    if (pipe(fds)) return NULL;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, fds[1], 1);
+    posix_spawn_file_actions_addclose(&fa, fds[0]);
+    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", 1 /* O_WRONLY */, 0);
+    pid_t pid;
+    int e = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(fds[1]);
+    if (e) {
+        close(fds[0]);
+        return NULL;
+    }
+    char *buf = malloc(4096);
+    size_t n = 0;
+    ssize_t k;
+    while (buf && n < 4095 && (k = read(fds[0], buf + n, 4095 - n)) > 0) n += (size_t)k;
+    close(fds[0]);
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0) {}
+    if (!buf || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        free(buf);
+        return NULL;
+    }
+    while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) n--;
+    buf[n] = 0;
+    return buf;
+}
+
+// Shows the prompt and waits for the answer. Returns 1 with the text in out (n units), 0 when cancelled.
+static int text_entry_run(const SwkbdRequest *req, uint16_t *out, size_t cap, size_t *n) {
+    char prompt[0x400], initial[KB_LIMIT * 4 + 1];
+    prompt[utf16_to_utf8(req->prompt, u16_len(req->prompt, 0x100), prompt, sizeof prompt - 1)] = 0;
+    initial[utf16_to_utf8(req->initial, u16_len(req->initial, KB_LIMIT), initial, sizeof initial - 1)] = 0;
+    if (!prompt[0]) snprintf(prompt, sizeof prompt, "%s", "TotK Recomp");
+    const char *test = cfg_get("TOTK_SWKBD_TEST");
+    char *got = NULL;
+    if (test && *test) {
+        if (!strcmp(test, "cancel")) return 0;
+        got = strdup(initial);
+    } else {
+        char *zen[] = {"zenity", "--entry", "--title=TotK Recomp", "--text", prompt, "--entry-text", initial,
+                       req->password ? "--hide-text" : NULL, NULL};
+        char *kd[] = {"kdialog", "--title", "TotK Recomp", req->password ? "--password" : "--inputbox", prompt,
+                      req->password ? NULL : initial, NULL};
+        int have_tool = 0;
+        if (!access("/usr/bin/zenity", X_OK) || !access("/usr/local/bin/zenity", X_OK)) {
+            have_tool = 1;
+            got = run_prompt(zen);
+        } else if (!access("/usr/bin/kdialog", X_OK) || !access("/usr/local/bin/kdialog", X_OK)) {
+            have_tool = 1;
+            got = run_prompt(kd);
+        }
+        if (!have_tool) {
+            rt_log("nn::swkbd::ShowKeyboard: neither zenity nor kdialog is installed; answering with \"%s\"", initial);
+            got = strdup(initial);
+        } else if (!got)
+            return 0;   // cancelled (or the tool failed)
+    }
+    if (!got) return 0;
+    uint16_t text[KB_LIMIT * 2 + 1];
+    size_t k = utf8_to_utf16(got, text, sizeof text / sizeof *text - 1);
+    free(got);
+    *n = k < cap ? k : cap;
+    memcpy(out, text, *n * 2);
+    return 1;
+}
+#endif
 
 // ---- nn::swkbd::ShowKeyboard
 static void request_from(const uint8_t *arg, SwkbdRequest *r) {

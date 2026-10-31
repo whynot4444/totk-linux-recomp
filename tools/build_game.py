@@ -46,11 +46,15 @@ Split build. --make-runtime-lib compiles only runtime/ into <out>/libtotkrt.a (w
 then compiles only the generated C and the install-time files (modules.c and INSTALL_SIDE, which bake the player's
 game hashes and version in) and links them with that library. The library holds no game-derived data.
 
+Linux: the same steps with the system's clang, lld and ninja (docs/linux.md). The runtime is compiled with
+runtime/platform/linux on the include path (its windows.h stands in for the Win32 API the runtime still calls) and links
+against the system's Vulkan loader, SDL3, Opus, libvpx and zstd (--deps DIR adds DIR/include and DIR/lib); the result is
+build/<version>/totk.
+
 Standard library only.
 """
 import argparse
 import ctypes
-import ctypes.wintypes as wt
 import hashlib
 import json
 import os
@@ -59,6 +63,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+LINUX = sys.platform.startswith('linux')
+if not LINUX:
+    import ctypes.wintypes as wt
 
 import romfs_index
 from build_shaders import stale as stale_shaders
@@ -89,10 +97,25 @@ DEFAULT_DEPS = ROOT / 'toolchain' / 'deps-mingw'
 # functions sit on it).
 INSTALL_SIDE = {'romfs.c', 'patches.c', 'ov_zstd.c'}
 LIB_NAME = 'libtotkrt.a'
+EXE_NAME = 'totk' if LINUX else 'totk.exe'
+if LINUX:
+    # The system toolchain. lld when installed (faster on the large generated objects), else the default linker.
+    CLANG = Path(shutil.which('clang') or '/usr/bin/clang')
+    NINJA = Path(shutil.which('ninja') or '/usr/bin/ninja')
+    SDL3_DLLS = []
+    LINK_FLAGS = (['-fuse-ld=lld'] if shutil.which('ld.lld') else []) + \
+        ['-pthread', '"-Wl,-Map=$builddir/totk.map"', "'-Wl,-rpath,$$ORIGIN/lib'"]   # lib/: a portable folder's .so files
+    LINK_LIBS = ['-lvulkan', '-lSDL3', '-lopus', '-lvpx', '-lzstd', '-lstdc++', '-lm', '-ldl']
+    # Win32 names the runtime still uses come from runtime/platform/linux (windows.h, crt_compat.h); GetLastError and
+    # DWORD print with %lu, which -Wformat flags on LP64 although the value passes correctly.
+    RT_FLAGS = RT_FLAGS + ['-D_GNU_SOURCE', '-pthread', '-Wno-format', '-Wno-unknown-pragmas']
 AR = UCRT / 'llvm-ar.exe'
 WINDRES = UCRT / 'windres.exe'   # runtime/totk.rc: the manifest of totk.exe
+if LINUX:
+    AR = Path(shutil.which('llvm-ar') or shutil.which('ar') or '/usr/bin/ar')
 TOOLCHAIN_BIN = None   # llvm-mingw bin directory, set by main() for --toolchain
 DEPS = None            # the deps directory of an llvm-mingw build
+SYSROOT = None         # Linux --sysroot: glibc and libstdc++ of the AppImage (tools/make_appimage.py)
 # tools/data/expected-<display version>.json for each build version name.
 DISPLAY_VERSIONS = {'v0': '1.0.0', 'v112': '1.1.2', 'v121': '1.2.1', 'v143': '1.4.3'}
 
@@ -193,8 +216,8 @@ RUNTIME = ROOT / 'runtime'   # --runtime: a copy of runtime/ lets a task build w
 def runtime_sources(skip=()):
     """Every runtime/*.c, *.cpp, platform/*.c, *.rc, the in-game menu (ui/*.cpp) and Dear ImGui except the names in skip,
     so a task adds a file without editing this script."""
-    pats = ('*.c', '*.cpp', 'platform/*.c', '*.rc', 'ui/*.cpp', 'third_party/imgui/*.cpp',
-            'third_party/imgui/backends/*.cpp')
+    pats = ('*.c', '*.cpp', 'platform/linux/*.c' if LINUX else 'platform/*.c', 'ui/*.cpp', 'third_party/imgui/*.cpp',
+            'third_party/imgui/backends/*.cpp') + (() if LINUX else ('*.rc',))
     return sorted(p for pat in pats for p in RUNTIME.glob(pat) if p.name not in skip)
 
 
@@ -236,6 +259,17 @@ def module_glue(layout, linked, hashes, paths, version):
     return '\n'.join(out)
 
 
+def write_embed_fallbacks(out):
+    """<out>/roboto_ttf.inc: the menu font as C byte literals, which ui/menu.cpp includes when the compiler has no
+    #embed (clang before 19). Rewritten only when it changes."""
+    font = RUNTIME / 'ui' / 'fonts' / 'Roboto-Medium.ttf'
+    if not font.is_file():   # a release runtime/ (headers only): menu.cpp is already in libtotkrt.a
+        return
+    data = font.read_bytes()
+    rows = (','.join(str(b) for b in data[i:i + 32]) for i in range(0, len(data), 32))
+    write_if_changed(out / 'roboto_ttf.inc', ',\n'.join(rows) + '\n')
+
+
 def port_version():
     """VERSION at the root: the repository's semver, or in a release folder the release string (make_release.py
     version)."""
@@ -252,14 +286,27 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
     imgui = cmd_path(RUNTIME / 'third_party' / 'imgui')
     rt_inc = f'{inc} -I {cmd_path(out)} -I {vma} -I {imgui}'   # romfs_config.h, vk_mem_alloc.h (+ deps headers), imgui.h
     libs = [f'-L {cmd_path(DEPS / "lib")}'] + LLVM_LINK_LIBS if DEPS else LINK_LIBS
+    if LINUX and SYSROOT:   # the AppImage's toolchain: its own libc and headers, its own lld
+        sr = f' --sysroot={cmd_path(SYSROOT)}'
+        lines_extra = sr
+    else:
+        lines_extra = ''
+    if LINUX:
+        lin = RUNTIME / 'platform' / 'linux'
+        rt_inc = f'-I {cmd_path(lin)} -include {cmd_path(lin / "crt_compat.h")} {inc} -I {cmd_path(out)} -I {imgui}'
+        rt_inc += ''.join(f' -I {cmd_path(d)}' for d in (DEPS / 'include', DEPS / 'include' / 'vma')) if DEPS else \
+            ''.join(f' -I {d}' for d in ('/usr/include/vma',) if Path(d).is_dir())
+        # A system build keeps a run path to --deps; an AppImage install carries the libraries in lib/ ($ORIGIN/lib)
+        libs = ([f'-L {cmd_path(DEPS / "lib")}'] + ([] if SYSROOT else [f"'-Wl,-rpath,{cmd_path(DEPS / 'lib')}'"])
+                if DEPS else []) + LINK_LIBS
     lines = [
         '# Written by tools/build_game.py; do not edit.',
         'ninja_required_version = 1.10',
         f'builddir = {ninja_path(out)}',
         f'cc = {cmd_arg(CLANG.as_posix())}',
-        f'genflags = {" ".join(GEN_FLAGS)} {inc}',
-        f'rtflags = {" ".join(RT_FLAGS)} {rt_inc}',
-        f'ldflags = {" ".join(LINK_FLAGS)}',
+        f'genflags = {" ".join(GEN_FLAGS)} {inc}{lines_extra}',
+        f'rtflags = {" ".join(RT_FLAGS)} {rt_inc}{lines_extra}',
+        f'ldflags = {" ".join(LINK_FLAGS)}{lines_extra}',
         f'libs = {" ".join(libs)}',
         '',
         'pool gen',
@@ -315,7 +362,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         rt.append(o)
     objs['runtime'] = rt
     every = [o for v in objs.values() for o in v]
-    exe = out / 'totk.exe'
+    exe = out / EXE_NAME
     if make_lib:
         exe = out / LIB_NAME
         lines += ['', 'rule ar', f'  command = {cmd_arg(AR.as_posix())} rcs $out $in', '  description = AR $out', '', f'build {ninja_path(exe)}: ar ' + ' '.join(ninja_path(o) for o in every),
@@ -513,9 +560,9 @@ class IoCounters(ctypes.Structure):
 
 class BasicLimits(ctypes.Structure):
     _fields_ = [('PerProcessUserTimeLimit', ctypes.c_longlong), ('PerJobUserTimeLimit', ctypes.c_longlong),
-                ('LimitFlags', wt.DWORD), ('MinimumWorkingSetSize', ctypes.c_size_t),
-                ('MaximumWorkingSetSize', ctypes.c_size_t), ('ActiveProcessLimit', wt.DWORD),
-                ('Affinity', ctypes.c_size_t), ('PriorityClass', wt.DWORD), ('SchedulingClass', wt.DWORD)]
+                ('LimitFlags', ctypes.c_uint32), ('MinimumWorkingSetSize', ctypes.c_size_t),
+                ('MaximumWorkingSetSize', ctypes.c_size_t), ('ActiveProcessLimit', ctypes.c_uint32),
+                ('Affinity', ctypes.c_size_t), ('PriorityClass', ctypes.c_uint32), ('SchedulingClass', ctypes.c_uint32)]
 
 
 class ExtendedLimits(ctypes.Structure):
@@ -531,6 +578,12 @@ CREATE_SUSPENDED = 0x4
 
 def run_measured(cmd, env):
     """Run cmd in its own job object. Returns (exit code, seconds, peak bytes of one process, peak bytes of all)."""
+    if LINUX:   # no job objects: the largest child's peak resident size; the total is not known
+        import resource
+        t0 = time.monotonic()
+        code = subprocess.run(cmd, cwd=ROOT, env=env).returncode
+        peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024
+        return code, time.monotonic() - t0, peak, peak
     k32 = ctypes.WinDLL('kernel32', use_last_error=True)
     k32.CreateJobObjectW.restype = wt.HANDLE
     k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
@@ -564,6 +617,8 @@ def run_measured(cmd, env):
 
 
 def total_ram():
+    if LINUX:
+        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
     class MemStatus(ctypes.Structure):
         _fields_ = [('dwLength', wt.DWORD), ('dwMemoryLoad', wt.DWORD)] + \
                    [(n, ctypes.c_ulonglong) for n in ('total', 'avail', 'tpf', 'apf', 'tv', 'av', 'aev')]
@@ -623,6 +678,7 @@ def main():
                     help=f'build only <out>/{LIB_NAME} from runtime/ (no generated C, no totk.exe)')
     ap.add_argument('--runtime-lib', type=Path, help=f'link against this {LIB_NAME} instead of compiling runtime/ '
                                                     f'({", ".join(sorted(INSTALL_SIDE))} and modules.c still compile)')
+    ap.add_argument('--sysroot', type=Path, help='Linux: compile and link against this sysroot (the AppImage\'s glibc)')
     ap.add_argument('--expected', type=Path,
                     help='expected hashes (default tools/data/expected-<display version>.json)')
     args = ap.parse_args()
@@ -640,13 +696,27 @@ def main():
             sys.exit(f'no expected hashes known for {args.version}; pass --expected')
         expected = ROOT / 'tools' / 'data' / f'expected-v{DISPLAY_VERSIONS[args.version]}.json'
     hashes = json.loads(Path(expected).read_text())['exefs_sha256']
-    global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS
+    global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS, SYSROOT, LINK_FLAGS, LINK_LIBS
     if args.ninja:
         NINJA = args.ninja.resolve()
     elif not NINJA.is_file() and (ROOT / 'bin' / 'ninja.exe').is_file():
         NINJA = ROOT / 'bin' / 'ninja.exe'   # the release folder (tools/make_release.py)
     dlls = SDL3_DLLS
-    if args.toolchain:
+    if LINUX:
+        if args.toolchain:   # an LLVM tree: bin/clang, bin/ld.lld, bin/llvm-ar
+            TOOLCHAIN_BIN = (args.toolchain / 'bin').resolve()
+            CLANG = TOOLCHAIN_BIN / 'clang'
+            AR = TOOLCHAIN_BIN / 'llvm-ar'
+            if '-fuse-ld=lld' not in LINK_FLAGS:
+                LINK_FLAGS = ['-fuse-ld=lld'] + LINK_FLAGS
+        if args.deps:
+            DEPS = args.deps.resolve()
+        if args.sysroot:
+            SYSROOT = args.sysroot.resolve()
+            # libstdc++ and libgcc inside totk: the players' systems may carry an older libstdc++ than the sysroot
+            LINK_FLAGS = LINK_FLAGS + ['-static-libgcc']
+            LINK_LIBS = ['-l:libstdc++.a' if x == '-lstdc++' else x for x in LINK_LIBS]
+    elif args.toolchain:
         TOOLCHAIN_BIN = (args.toolchain / 'bin').resolve()
         CLANG = TOOLCHAIN_BIN / 'clang.exe'
         AR = TOOLCHAIN_BIN / 'llvm-ar.exe'
@@ -655,7 +725,8 @@ def main():
         dlls = sorted((DEPS / 'bin').glob('*.dll'))
     for tool in (CLANG, NINJA):
         if not tool.is_file():
-            sys.exit(f'{tool} not found: install MSYS2 UCRT64 clang, lld and ninja (docs/building.md)')
+            sys.exit(f'{tool} not found: install ' + ('clang, lld and ninja (docs/linux.md)' if LINUX else
+                                                       'MSYS2 UCRT64 clang, lld and ninja (docs/building.md)'))
     if not (gen / 'layout.json').is_file():
         sys.exit(f'{gen / "layout.json"} not found: run the generator first')
 
@@ -684,6 +755,7 @@ def main():
     copy_romfs_patches(args.version, out)
     global RUNTIME
     RUNTIME = (args.runtime or RUNTIME).resolve()
+    write_embed_fallbacks(out)
     stale = stale_shaders(RUNTIME)
     if stale:
         sys.exit(f'{stale[0]}: its SPIR-V header no longer matches; run python tools/build_shaders.py')
@@ -715,7 +787,9 @@ def main():
                                  args.make_runtime_lib)
     write_if_changed(out / 'build.ninja', text)
 
-    env = dict(os.environ, PATH=str(TOOLCHAIN_BIN or UCRT) + os.pathsep + os.environ.get('PATH', ''))
+    env = dict(os.environ, PATH=str(TOOLCHAIN_BIN) + os.pathsep + os.environ.get('PATH', '')) if LINUX and TOOLCHAIN_BIN \
+        else dict(os.environ) if LINUX else \
+        dict(os.environ, PATH=str(TOOLCHAIN_BIN or UCRT) + os.pathsep + os.environ.get('PATH', ''))
     base = [str(NINJA), '-f', str(out / 'build.ninja'), '-j', str(jobs)]
     nfiles = sum(len(v) for v in mods.values())
     print(f'build_game: {nfiles} generated files in {len(linked)} modules ({", ".join(linked)}), {jobs} jobs', flush=True)
@@ -735,7 +809,7 @@ def main():
     code, dt, peak_one, _ = run_measured(base + [flag_path(exe)], env)
     print(f'link: {dt:.1f} s, peak {mib(peak_one)}')
     if code:
-        print(f'build_game: link failed, {flag_path(exe)} is the old one (a running totk.exe from this dir locks it)',
+        print(f'build_game: link failed, {flag_path(exe)} is the old one (a running {EXE_NAME} from this dir locks it)',
               file=sys.stderr)
         sys.exit(code)
     if args.make_runtime_lib:
@@ -743,6 +817,9 @@ def main():
         return
     for dll in dlls:   # dynamic SDL3 (zlib) and its libiconv (LGPL, unmodified DLL), found next to totk.exe
         shutil.copy2(dll, exe.parent / dll.name)
+    if LINUX:
+        print(f'{below_root(exe)}: file {mib(exe.stat().st_size)}')
+        return
     sections, image = pe_sections(exe)
     print(f'{below_root(exe)}: file {mib(exe.stat().st_size)}, '
           f'image {mib(image)}; ' + ', '.join(f'{k} {mib(v)}' for k, v in sections.items() if k.startswith('.') and v))

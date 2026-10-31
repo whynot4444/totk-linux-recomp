@@ -56,6 +56,7 @@ ALLOWED = {
     "vk_dump.c": "pending: SRW locks, threads, files; not in 2.7a/b/c scope yet",
     "vk_pipeline.c": "pending: SRW locks, threads, files; not in 2.7a/b/c scope yet",
     "vk_sync.c": "pending: SRW locks, threads, files; not in 2.7a/b/c scope yet",
+    "vk.h": "Linux: includes the windows.h stand-in that vulkan_win32.h brings on Windows",
 }
 
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"](windows|winsock2|ws2tcpip|synchapi|memoryapi|processthreadsapi|'

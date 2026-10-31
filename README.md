@@ -1,6 +1,6 @@
 # TotK Recomp
 
-**TotK Recomp** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native Windows x86-64 application ([docs/architecture.md](docs/architecture.md)).
+**TotK Recomp** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native Windows and Linux x86-64 application ([docs/architecture.md](docs/architecture.md)).
 
 > [!IMPORTANT]
 > **No game files are included.** You need your own legally obtained copy of *Tears of the Kingdom*, dumped from your own console: the base game and the 1.2.1 or 1.4.3 update. Instructions for obtaining those files will not be provided.
@@ -25,7 +25,7 @@ Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Planned
 
-- Linux and the Steam Deck
+- Linux and the Steam Deck: builds from source ([docs/linux.md](docs/linux.md)); not yet played end to end, no installer
 - Mods made for emulators: unpack a mod into a `mods` folder
 - Custom aspect ratios, including ultrawide
 - VRR
@@ -63,6 +63,6 @@ TotK Recomp is an independent, non-commercial fan project, not affiliated with o
 
 ## Building from source
 
-[docs/building.md](docs/building.md) lists the toolchain and the steps. Everything the build writes stays under `build\` and `generated\`, which git ignores; run `tools/check_content.py` before a commit. Testers: [docs/tester-guide.md](docs/tester-guide.md).
+[docs/building.md](docs/building.md) lists the toolchain and the steps; Linux: [docs/linux.md](docs/linux.md). Everything the build writes stays under `build\` and `generated\`, which git ignores; run `tools/check_content.py` before a commit. Testers: [docs/tester-guide.md](docs/tester-guide.md).
 
 Most of the code and documentation is written by AI coding agents (Claude Code) under the maintainer's direction; the maintainer plays every build and decides what is merged. [AGENTS.md](AGENTS.md) holds the rules they work under.

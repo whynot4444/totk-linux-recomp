@@ -75,7 +75,10 @@ def flat(value):
 
 
 def windows_ui_language():
-    """'ru' when the Windows display language is Russian, else 'en'."""
+    """'ru' when the Windows display language (on Linux: LC_ALL, LC_MESSAGES, LANG) is Russian, else 'en'."""
+    if os.name != 'nt':
+        v = os.environ.get('LC_ALL') or os.environ.get('LC_MESSAGES') or os.environ.get('LANG') or ''
+        return 'ru' if v.lower().startswith('ru') else 'en'
     try:
         langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
     except (AttributeError, OSError):
@@ -316,7 +319,15 @@ else:
 
 def send_break(proc, python=None):
     """Ctrl+Break to the process group of proc (started with CREATE_NEW_PROCESS_GROUP). The window itself may have no
-    console (pythonw), so a short helper process attaches to the child's console and sends it."""
+    console (pythonw), so a short helper process attaches to the child's console and sends it. Elsewhere: SIGTERM to
+    the child's session (started with start_new_session), which the CLI handles as a cancel."""
+    if os.name != 'nt':
+        import signal
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            return True
+        except OSError:
+            return False
     helper = [str(python or sys.executable), '-c', _BREAK, str(proc.pid)]
     flags = CREATE_NO_WINDOW if os.name == 'nt' else 0
     r = subprocess.run(helper, creationflags=flags, capture_output=True)
@@ -334,8 +345,9 @@ class Process:
         self.lines = queue.Queue()
         flags = (CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW) if creationflags is None else creationflags
         env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUTF8='1', PYTHONUNBUFFERED='1')
+        extra = {'creationflags': flags} if os.name == 'nt' else {'start_new_session': True}
         self.proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, creationflags=flags)
+                                     stderr=subprocess.STDOUT, **extra)
         self.cancelled_at = None
         self.reader = threading.Thread(target=self.read, daemon=True)
         self.reader.start()

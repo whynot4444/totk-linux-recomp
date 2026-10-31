@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from . import ini
-from .layout import EXE, SUPPORTED, version_tag
+from .layout import EXE, LIB_DIR, SUPPORTED, version_tag
 from .runner import InstallError, Step
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'tools'))
@@ -234,6 +234,8 @@ class Check(Step):
         command = [str(layout.clang), '-O1', str(HOSTCHECK), '-I', str(layout.deps / 'include'), '-o', str(exe)]
         if os.name != 'nt':
             command.append('-ldl')
+        if layout.sysroot:   # Linux release: the bundled glibc and its headers, linked with the bundled lld
+            command += [f'--sysroot={layout.sysroot}', '-fuse-ld=lld']
         r = subprocess.run(command, capture_output=True, text=True, errors='replace')
         if r.returncode:
             ctx.reporter.log(r.stdout + r.stderr)
@@ -539,7 +541,7 @@ class Compile(Step):
         exe = ctx.dest / ('totk' + EXE)
         if not exe.is_file() or not (ctx.dest / 'romfs-index.bin').is_file():
             return False
-        if not all((ctx.dest / d.name).is_file() for d in ctx.layout.dlls):
+        if not all((ctx.dest / LIB_DIR / d.name).is_file() for d in ctx.layout.dlls):
             return False
         return file_sha256(exe) == record.get('exe_sha256')
 
@@ -562,7 +564,7 @@ class Compile(Step):
             '--runtime', layout.runtime, '--runtime-lib', layout.runtime_lib, '--ninja', layout.ninja,
             '--version', version_tag(game_version(ctx)), '--expected', layout.expected(game_version(ctx)),
             '--exefs', dest / 'exefs', '--romfs', dest / 'romfs',
-            '--profile', dest / 'profile'], parse)
+            '--profile', dest / 'profile'] + (['--sysroot', layout.sysroot] if layout.sysroot else []), parse)
         exe = build / ('totk' + EXE)
         if code or not exe.is_file():
             raise InstallError('compile.failed', code=code, log=str(log))
@@ -571,8 +573,10 @@ class Compile(Step):
         except PermissionError:
             raise InstallError('compile.exe_in_use', path=str(dest / exe.name)) from None
         replace_file(build / 'romfs-index.bin', dest / 'romfs-index.bin')
-        for dll in layout.dlls:
-            replace_file(dll, dest / dll.name)
+        if LIB_DIR:
+            (dest / LIB_DIR).mkdir(exist_ok=True)
+        for dll in layout.dlls:   # beside totk.exe on Windows; lib/ on Linux (totk's run path is $ORIGIN/lib)
+            replace_file(dll, dest / LIB_DIR / dll.name)
         return {'exe_sha256': file_sha256(dest / exe.name)}
 
 

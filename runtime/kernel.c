@@ -403,6 +403,7 @@ static int ap_disabled(const RtThread *t) { return g_ap > 0 && ap_tlr(t)[0]; }
 // in kern_ap_yield and jumps back to kern_ap_rip(), whose value it first stores in the return slot it reserved at
 // entry, so a stack walk sees the interrupted function as its caller. No ret: the jump keeps call/return pairs
 // balanced. The waiter never writes the owner's stack.
+#ifdef _WIN32
 __asm__(".text\n"
         ".globl kern_ap_stub\n"
         ".def kern_ap_stub; .scl 2; .type 32; .endef\n"
@@ -488,6 +489,87 @@ __asm__(".text\n"
         "    leaq 8(%rsp), %rsp\n"
         "    jmpq *-8(%rsp)\n"
         ".seh_endproc\n");
+#else
+// System V (Linux): rsi and rdi are caller-saved too, and code below the interrupted rsp may live in the 128-byte red
+// zone, so the stub first steps over it. The return slot then sits 128 bytes below the interrupted rsp, and the stub
+// ends by jumping through it after restoring rsp; a stack walk still finds the interrupted function as the caller.
+__asm__(".text\n"
+        ".globl kern_ap_stub\n"
+        ".type kern_ap_stub, @function\n"
+        ".p2align 4\n"
+        "kern_ap_stub:\n"
+        "    leaq -136(%rsp), %rsp\n"   // the red zone, then the return slot; lea keeps the flags
+        "    pushfq\n"
+        "    pushq %rax\n"
+        "    pushq %rcx\n"
+        "    pushq %rdx\n"
+        "    pushq %rsi\n"
+        "    pushq %rdi\n"
+        "    pushq %r8\n"
+        "    pushq %r9\n"
+        "    pushq %r10\n"
+        "    pushq %r11\n"
+        "    pushq %rbp\n"
+        "    movq %rsp, %rbp\n"
+        "    andq $-32, %rsp\n"
+        "    subq $576, %rsp\n"   // 32: MXCSR saved, 36: MXCSR default, 64: YMM0-15
+        "    vmovdqa %ymm0, 64(%rsp)\n"
+        "    vmovdqa %ymm1, 96(%rsp)\n"
+        "    vmovdqa %ymm2, 128(%rsp)\n"
+        "    vmovdqa %ymm3, 160(%rsp)\n"
+        "    vmovdqa %ymm4, 192(%rsp)\n"
+        "    vmovdqa %ymm5, 224(%rsp)\n"
+        "    vmovdqa %ymm6, 256(%rsp)\n"
+        "    vmovdqa %ymm7, 288(%rsp)\n"
+        "    vmovdqa %ymm8, 320(%rsp)\n"
+        "    vmovdqa %ymm9, 352(%rsp)\n"
+        "    vmovdqa %ymm10, 384(%rsp)\n"
+        "    vmovdqa %ymm11, 416(%rsp)\n"
+        "    vmovdqa %ymm12, 448(%rsp)\n"
+        "    vmovdqa %ymm13, 480(%rsp)\n"
+        "    vmovdqa %ymm14, 512(%rsp)\n"
+        "    vmovdqa %ymm15, 544(%rsp)\n"
+        "    stmxcsr 32(%rsp)\n"
+        "    movl $0x1f80, 36(%rsp)\n"
+        "    ldmxcsr 36(%rsp)\n"
+        "    cld\n"
+        "    vzeroupper\n"
+        "    call kern_ap_rip\n"
+        "    movq %rax, 96(%rbp)\n"   // the return slot: rbp + 10 pushes + pushfq
+        "    call kern_ap_yield\n"
+        "    ldmxcsr 32(%rsp)\n"
+        "    vmovdqa 64(%rsp), %ymm0\n"
+        "    vmovdqa 96(%rsp), %ymm1\n"
+        "    vmovdqa 128(%rsp), %ymm2\n"
+        "    vmovdqa 160(%rsp), %ymm3\n"
+        "    vmovdqa 192(%rsp), %ymm4\n"
+        "    vmovdqa 224(%rsp), %ymm5\n"
+        "    vmovdqa 256(%rsp), %ymm6\n"
+        "    vmovdqa 288(%rsp), %ymm7\n"
+        "    vmovdqa 320(%rsp), %ymm8\n"
+        "    vmovdqa 352(%rsp), %ymm9\n"
+        "    vmovdqa 384(%rsp), %ymm10\n"
+        "    vmovdqa 416(%rsp), %ymm11\n"
+        "    vmovdqa 448(%rsp), %ymm12\n"
+        "    vmovdqa 480(%rsp), %ymm13\n"
+        "    vmovdqa 512(%rsp), %ymm14\n"
+        "    vmovdqa 544(%rsp), %ymm15\n"
+        "    movq %rbp, %rsp\n"
+        "    popq %rbp\n"
+        "    popq %r11\n"
+        "    popq %r10\n"
+        "    popq %r9\n"
+        "    popq %r8\n"
+        "    popq %rdi\n"
+        "    popq %rsi\n"
+        "    popq %rdx\n"
+        "    popq %rcx\n"
+        "    popq %rax\n"
+        "    popfq\n"
+        "    leaq 136(%rsp), %rsp\n"   // back to the interrupted rsp
+        "    jmpq *-136(%rsp)\n"
+        ".size kern_ap_stub, .-kern_ap_stub\n");
+#endif
 
 enum { AP_NONE, AP_RETRY, AP_SENT };
 

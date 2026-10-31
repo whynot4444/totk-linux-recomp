@@ -5,6 +5,7 @@
 // the cursor (input_window_msg runs first; closing the menu gives the capture back). While the menu is open, its keys,
 // the mouse and focus changes go to it; the game polls the keyboard on its own (input_win.c) and gets nothing while the
 // menu is open (input_menu).
+#ifdef _WIN32   // Linux: ui/menu_sdl.cpp
 #include <windows.h>
 #include <windowsx.h>
 
@@ -85,3 +86,4 @@ extern "C" int menu_window_msg(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res)
     }
     return 0;
 }
+#endif
